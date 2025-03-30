@@ -1550,10 +1550,10 @@ def get_instruction_length(address_str: str) -> int:
 
 class MCP(idaapi.plugin_t):
     flags = idaapi.PLUGIN_KEEP
-    comment = "MCP Plugin"
-    help = "MCP"
-    wanted_name = "IDA MCP V2" # Renamed plugin
-    wanted_hotkey = "Ctrl-Alt-M"
+    comment = "MCP Plugin V2"
+    help = "MCP V2"
+    wanted_name = "IDA MCP V2.1" # Renamed plugin with version number
+    wanted_hotkey = "Ctrl-Alt-P" # Changed hotkey
 
     def init(self):
         self.server = Server()
