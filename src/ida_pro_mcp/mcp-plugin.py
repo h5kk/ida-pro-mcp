@@ -1552,7 +1552,7 @@ class MCP(idaapi.plugin_t):
     flags = idaapi.PLUGIN_KEEP
     comment = "MCP Plugin"
     help = "MCP"
-    wanted_name = "MCP"
+    wanted_name = "IDA MCP V2" # Renamed plugin
     wanted_hotkey = "Ctrl-Alt-M"
 
     def init(self):
