@@ -240,6 +240,9 @@ import ida_funcs
 import ida_gdl
 import ida_lines
 import ida_idaapi
+import ida_ida
+import ida_ua
+import ida_segment
 import idc
 import idaapi
 import idautils
@@ -248,7 +251,10 @@ import ida_bytes
 import ida_typeinf
 import ida_xref
 import ida_entry
-import idautils
+import ida_name # Added
+import os
+import glob
+from typing import List, Tuple, Dict # Added List, Tuple, Dict
 
 class IDAError(Exception):
     def __init__(self, message: str):
@@ -848,6 +854,699 @@ def set_local_variable_type(
     if not ida_hexrays.modify_user_lvars(func.start_ea, modifier):
         raise IDAError(f"Failed to modify local variable: {variable_name}")
     refresh_decompiler_ctext(func.start_ea)
+
+
+# --- Added Tools Start ---
+
+# --- Missing Implementations from User ---
+
+@jsonrpc
+@idaread
+def get_bytes(ea: int, size: int) -> str:
+    """Get bytes at specified address as a hex string.
+
+    Args:
+        ea: Effective address to read from
+        size: Number of bytes to read
+    """
+    if size <= 0:
+        raise IDAError("Size must be positive.")
+    try:
+        # Use ida_bytes.get_bytes for potentially better performance
+        byte_data = ida_bytes.get_bytes(ea, size)
+        if byte_data is None:
+             # Check if any part of the range is unloaded
+             for i in range(size):
+                 if not ida_bytes.is_loaded(ea + i):
+                     raise IDAError(f"Address range {hex(ea)} to {hex(ea+size-1)} contains unloaded memory.")
+             # If loaded but get_bytes failed, raise generic error
+             raise IDAError(f"Failed to read {size} bytes at {hex(ea)}.")
+        return byte_data.hex()
+    except Exception as e:
+        # Catch potential exceptions from get_bytes or is_loaded
+        raise IDAError(f"Error in get_bytes at {hex(ea)}: {str(e)}")
+
+
+@jsonrpc
+@idaread
+def get_disasm(ea: int) -> str:
+    """Get disassembly for the instruction at the specified address.
+
+    Args:
+        ea: Effective address to disassemble
+    """
+    if not ida_bytes.is_loaded(ea):
+        raise IDAError(f"Address {hex(ea)} is not loaded.")
+    line = idc.generate_disasm_line(ea, 0)
+    if not line:
+        # Check if it's the start of an instruction
+        flags = ida_bytes.get_flags(ea)
+        if not ida_bytes.is_code(flags):
+             raise IDAError(f"Address {hex(ea)} is not code.")
+        # If it is code but disasm failed, raise generic error
+        raise IDAError(f"Failed to generate disassembly for address {hex(ea)}.")
+    return line
+
+
+@jsonrpc
+@idaread
+def get_decompiled_func(ea: int) -> str:
+    """Get decompiled pseudocode of the function containing the address.
+
+    Args:
+        ea: Effective address within the function
+    """
+    func = ida_funcs.get_func(ea)
+    if not func:
+        raise IDAError(f"No function found containing address {hex(ea)}")
+
+    # Reuse existing decompile_checked logic
+    try:
+        cfunc = decompile_checked(func.start_ea) # Decompile from function start
+        sv = cfunc.get_pseudocode()
+        pseudocode = "\n".join([ida_lines.tag_remove(sl.line) for sl in sv])
+        return pseudocode
+    except IDAError as e:
+        # Propagate IDAError from decompile_checked or other issues
+        raise e
+    except Exception as e:
+        # Catch unexpected errors during decompilation process
+        raise IDAError(f"Unexpected error decompiling function at {hex(func.start_ea)}: {str(e)}")
+
+
+@jsonrpc
+@idaread
+def get_function_name(ea: int) -> str:
+    """Get the name of the function containing the specified address.
+
+    Args:
+        ea: Effective address within the function
+    """
+    func = ida_funcs.get_func(ea)
+    if not func:
+        raise IDAError(f"No function found containing address {hex(ea)}")
+
+    # Use get_func_name for potentially more robust name retrieval
+    name = ida_funcs.get_func_name(func.start_ea)
+    if not name:
+        # If get_func_name fails, try get_name as a fallback
+        name = ida_name.get_name(func.start_ea)
+        if not name:
+             # It's unusual for a function start not to have a name (even default loc_...)
+             # but handle it just in case.
+             raise IDAError(f"Could not retrieve name for function at {hex(func.start_ea)}")
+    return name
+
+
+@jsonrpc
+@idaread
+def get_segments() -> List[Dict[str, Any]]:
+    """Get all segments information."""
+    segments = []
+    for n in range(ida_segment.get_segm_qty()):
+        seg = ida_segment.getnseg(n)
+        if not seg:
+            continue # Should not happen if n < get_segm_qty()
+
+        # Use API functions to get details for robustness
+        name = ida_segment.get_segm_name(seg)
+        s_class = ida_segment.get_segm_class(seg)
+
+        segments.append(
+            {
+                "start": hex(seg.start_ea),
+                "end": hex(seg.end_ea),
+                "name": name if name else "",
+                "class": s_class if s_class else "",
+                "perm": seg.perm, # Permissions (int)
+                "bitness": seg.bitness, # 0=16, 1=32, 2=64
+                "align": seg.align, # Alignment code
+                "comb": seg.comb, # Combination code
+                "flags": seg.flags, # Segment flags
+                # 'type': seg.type, # Type is often internal, flags/perm more useful
+                # 'sel': seg.sel, # Selector is usually less relevant
+            }
+        )
+    return segments
+
+
+@jsonrpc
+@idaread
+def get_functions() -> List[Dict[str, Any]]:
+    """Get all functions in the binary (address and name)."""
+    functions = []
+    for func_ea in idautils.Functions():
+        # Use the more robust get_func_name
+        func_name = ida_funcs.get_func_name(func_ea)
+        if not func_name:
+             # Fallback if needed, though unlikely for function starts
+             func_name = ida_name.get_name(func_ea)
+
+        functions.append({"address": hex(func_ea), "name": func_name if func_name else f"sub_{func_ea:X}"})
+    return functions
+
+
+@jsonrpc
+@idaread
+def get_imports() -> Dict[str, List[Dict[str, Any]]]:
+    """Get all imports, grouped by module.
+
+    Returns:
+        Dict where keys are module names and values are lists of import details.
+        Each import detail dict contains 'address', 'name', and 'ordinal'.
+    """
+    import_tree = {}
+    nimps = idaapi.get_import_module_qty()
+
+    for i in range(nimps):
+        mod_name = idaapi.get_import_module_name(i)
+        if not mod_name:
+            continue
+
+        imports_list = []
+        def imports_cb(ea, name, ord):
+            imports_list.append({
+                "address": hex(ea),
+                "name": name if name else "",
+                "ordinal": ord
+            })
+            return True # Continue enumeration
+
+        idaapi.enum_import_names(i, imports_cb)
+
+        if imports_list:
+            # Ensure module name is a valid key (replace invalid chars if necessary, though unlikely)
+            valid_mod_name = mod_name.replace('.', '_') # Example replacement
+            if valid_mod_name not in import_tree:
+                import_tree[valid_mod_name] = []
+            import_tree[valid_mod_name].extend(imports_list)
+
+    return import_tree
+
+
+@jsonrpc
+@idaread
+def get_string_list() -> List[str]:
+    """Get a list of all string contents found in the binary."""
+    strings_only = []
+    for s in idautils.Strings():
+        try:
+            str_content = s.str.decode('utf-8', errors='replace') if hasattr(s, 'str') and isinstance(s.str, bytes) else str(s)
+            strings_only.append(str_content)
+        except Exception:
+            strings_only.append("<decoding error>")
+    return strings_only
+
+# --- End Missing Implementations ---
+
+
+@jsonrpc
+@idaread
+def get_exports() -> List[Dict[str, Any]]:
+    """Get all exports in the binary.
+
+    @return: List of dicts {index, ordinal, address, name, forwarded_to}
+    """
+    exports = []
+    for index, ordinal, ea, name in idautils.Entries():
+         # Check for forwarded exports (optional, but useful)
+         forwarded = ida_nalt.get_forwarded_export(ea)
+         exports.append({
+             "index": index,
+             "ordinal": ordinal,
+             "address": hex(ea),
+             "name": name if name else "",
+             "forwarded_to": forwarded if forwarded else ""
+         })
+    return exports
+
+
+@jsonrpc
+@idaread
+def get_entry_point() -> str:
+    """Get the main entry point address of the binary as hex."""
+    try:
+        # Modern IDA API
+        return ida_ida.inf_get_start_ea()
+    except (ImportError, AttributeError):
+        try:
+            # Alternative method: idc.get_inf_attr
+            return idc.get_inf_attr(idc.INF_START_EA)
+        except (ImportError, AttributeError):
+            # Last alternative method: use cvar.inf (might be older IDA)
+            entry_ea = idaapi.cvar.inf.start_ea
+    if entry_ea == idaapi.BADADDR:
+        raise IDAError("Could not determine entry point.")
+    return hex(entry_ea)
+
+
+@jsonrpc
+@idawrite
+def make_function(ea_str: str) -> str:
+    """Make a function at specified address."""
+    ea = parse_address(ea_str)
+    if not ida_funcs.add_func(ea):
+        # Check if already a function start
+        if ida_funcs.get_func(ea) and ida_funcs.get_func(ea).start_ea == ea:
+             return f"Address {hex(ea)} is already the start of a function."
+        # Check if part of another function
+        owner_func = ida_funcs.get_func(ea)
+        if owner_func:
+             raise IDAError(f"Failed to create function at {hex(ea)}. Address belongs to function {ida_funcs.get_func_name(owner_func.start_ea)} ({hex(owner_func.start_ea)}).")
+        # Check if data
+        flags = ida_bytes.get_flags(ea)
+        if ida_bytes.is_data(flags):
+             raise IDAError(f"Failed to create function at {hex(ea)}. Address is defined as data.")
+        # Generic failure
+        raise IDAError(f"Failed to create function at {hex(ea)}. Reason unknown.")
+    return f"Successfully created function at {hex(ea)}."
+
+
+@jsonrpc
+@idawrite
+def undefine_function(ea_str: str) -> str:
+    """Undefine a function at specified address (must be start address)."""
+    ea = parse_address(ea_str)
+    func = ida_funcs.get_func(ea)
+    # Ensure we are undefining at the start address
+    if not func or func.start_ea != ea:
+         raise IDAError(f"Address {hex(ea)} is not the start of a function.")
+
+    if not ida_funcs.del_func(ea):
+        raise IDAError(f"Failed to undefine function at {hex(ea)}. Reason unknown.")
+    return f"Successfully undefined function at {hex(ea)}."
+
+
+@jsonrpc
+@idaread
+def get_dword_at(ea_str: str) -> int:
+    """Get the dword (4 bytes) at specified address."""
+    ea = parse_address(ea_str)
+    # Ensure address is valid before reading
+    # Check if 4 bytes are loaded
+    for i in range(4):
+        if not ida_bytes.is_loaded(ea + i):
+            raise IDAError(f"Address range {hex(ea)} to {hex(ea+3)} is not fully loaded.")
+    # Use ida_bytes API for potentially better handling of undefined bytes
+    val = ida_bytes.get_dword(ea)
+    # get_dword returns BADADDR (-1) on failure, which could be a valid value.
+    # Check flags explicitly if needed, but is_loaded check is primary.
+    # if val == idaapi.BADADDR and ida_bytes.get_flags(ea) == ida_bytes.FF_UNDEF:
+    #     raise IDAError(f"Could not read dword at {hex(ea)} (undefined bytes).")
+    return val
+
+
+@jsonrpc
+@idaread
+def get_word_at(ea_str: str) -> int:
+    """Get the word (2 bytes) at specified address."""
+    ea = parse_address(ea_str)
+    for i in range(2):
+        if not ida_bytes.is_loaded(ea + i):
+            raise IDAError(f"Address range {hex(ea)} to {hex(ea+1)} is not fully loaded.")
+    val = ida_bytes.get_word(ea)
+    return val
+
+
+@jsonrpc
+@idaread
+def get_byte_at(ea_str: str) -> int:
+    """Get the byte (1 byte) at specified address."""
+    ea = parse_address(ea_str)
+    if not ida_bytes.is_loaded(ea):
+        raise IDAError(f"Address {hex(ea)} is not loaded.")
+    val = ida_bytes.get_byte(ea)
+    return val
+
+
+@jsonrpc
+@idaread
+def get_qword_at(ea_str: str) -> int:
+    """Get the qword (8 bytes) at specified address."""
+    ea = parse_address(ea_str)
+    for i in range(8):
+        if not ida_bytes.is_loaded(ea + i):
+            raise IDAError(f"Address range {hex(ea)} to {hex(ea+7)} is not fully loaded.")
+    val = ida_bytes.get_qword(ea)
+    return val
+
+
+@jsonrpc
+@idaread
+def get_float_at(ea_str: str) -> float:
+    """Get the float (4 bytes) at specified address."""
+    ea = parse_address(ea_str)
+    for i in range(4):
+        if not ida_bytes.is_loaded(ea + i):
+            raise IDAError(f"Address range {hex(ea)} to {hex(ea+3)} is not fully loaded.")
+    # Use ida_bytes API
+    float_bytes = ida_bytes.get_bytes(ea, 4)
+    if float_bytes is None:
+         raise IDAError(f"Could not read bytes for float at {hex(ea)}")
+    # Interpret bytes as float (assuming little-endian)
+    try:
+        return struct.unpack('<f', float_bytes)[0]
+    except struct.error:
+        raise IDAError(f"Could not unpack bytes as float at {hex(ea)}")
+
+
+@jsonrpc
+@idaread
+def get_double_at(ea_str: str) -> float:
+    """Get the double (8 bytes) at specified address."""
+    ea = parse_address(ea_str)
+    for i in range(8):
+        if not ida_bytes.is_loaded(ea + i):
+            raise IDAError(f"Address range {hex(ea)} to {hex(ea+7)} is not fully loaded.")
+    double_bytes = ida_bytes.get_bytes(ea, 8)
+    if double_bytes is None:
+         raise IDAError(f"Could not read bytes for double at {hex(ea)}")
+    try:
+        return struct.unpack('<d', double_bytes)[0]
+    except struct.error:
+        raise IDAError(f"Could not unpack bytes as double at {hex(ea)}")
+
+
+@jsonrpc
+@idaread
+def get_string_at(ea_str: str, maxlen: int = -1, strtype: int = ida_nalt.STRTYPE_C) -> str:
+    """Get the string at specified address.
+
+    Args:
+        ea_str: Address string (e.g., "0x401000")
+        maxlen: Maximum length to read (-1 for unlimited until null). Defaults to -1.
+        strtype: String type code (e.g., ida_nalt.STRTYPE_C, ida_nalt.STRTYPE_PASCAL). Defaults to C string.
+    """
+    ea = parse_address(ea_str)
+    if not ida_bytes.is_loaded(ea):
+        raise IDAError(f"Address {hex(ea)} is not loaded.")
+
+    s_bytes = ida_bytes.get_strlit_contents(ea, maxlen, strtype)
+    if s_bytes is None:
+        # Check if it's actually defined as a string
+        flags = ida_bytes.get_flags(ea)
+        if not ida_bytes.is_strlit(flags):
+             raise IDAError(f"Address {hex(ea)} is not defined as a string literal.")
+        # If defined but failed to read, raise generic error
+        raise IDAError(f"Could not retrieve string literal contents at {hex(ea)}.")
+
+    # Decode bytes to string, attempting common encodings
+    try:
+        return s_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        try:
+            # Try latin-1 as a fallback for arbitrary byte sequences
+            return s_bytes.decode('latin-1')
+        except Exception:
+             # If all decoding fails, return hex representation
+             return f"<undecodable bytes: {s_bytes.hex()}>"
+    except AttributeError: # Handle if it's already a string (older IDA?)
+        return str(s_bytes)
+
+
+@jsonrpc
+@idaread
+def get_strings(min_len: int = 5) -> List[Dict[str, Any]]:
+    """Get all strings in the binary (address, content, type).
+
+    Args:
+        min_len: Minimum length of strings to retrieve. Defaults to 5.
+    """
+    strings_list = []
+    string_types = {
+        ida_nalt.STRTYPE_C: "C",
+        ida_nalt.STRTYPE_PASCAL: "Pascal",
+        ida_nalt.STRTYPE_LEN2: "Delphi (len2)",
+        ida_nalt.STRTYPE_LEN4: "Delphi (len4)",
+        ida_nalt.STRTYPE_C_16: "C (UTF-16)",
+        # Add other types as needed
+    }
+    # Configure Strings window settings temporarily if needed (optional)
+    # s_win = ida_kernwin.find_widget("Strings")
+    # if s_win:
+    #    ida_kernwin.activate_widget(s_win, True)
+    #    # ida_kernwin.process_ui_action("StringsSetup") # This requires user interaction
+
+    for s in idautils.Strings(minlen=min_len):
+        try:
+            str_content = s.str.decode('utf-8', errors='replace') if hasattr(s, 'str') and isinstance(s.str, bytes) else str(s)
+        except Exception:
+            str_content = "<decoding error>"
+        strings_list.append({
+            "address": hex(s.ea),
+            "string": str_content,
+            "length": s.length,
+            "type": string_types.get(s.type, f"Unknown ({s.type})")
+        })
+    return strings_list
+
+
+@jsonrpc
+@idaread
+def get_current_file_path() -> str:
+    """Get the full path of the currently loaded input file (IDB or original)."""
+    # Try IDB path first
+    path = idc.get_idb_path()
+    if not path:
+        # Fallback to input file path
+        path = idc.get_input_file_path()
+        if not path:
+            raise IDAError("Could not get IDB or input file path.")
+    return path
+
+
+def _validate_relative_path(base_dir: str, relative_path: str) -> str:
+    """Helper to validate and resolve relative paths securely."""
+    if not relative_path:
+        raise IDAError("Relative path cannot be empty.")
+    # Basic path traversal prevention
+    if '..' in relative_path or ':' in relative_path or relative_path.startswith('/') or relative_path.startswith('\\'):
+        raise IDAError(f"Invalid relative path: {relative_path}")
+
+    full_path = os.path.abspath(os.path.join(base_dir, relative_path))
+
+    # Ensure the resolved path is still within the base directory
+    if not full_path.startswith(os.path.abspath(base_dir)):
+        raise IDAError(f"Path traversal attempt detected: {relative_path}")
+
+    return full_path
+
+@jsonrpc
+@idaread
+def list_files_with_relative_path(relative_path: str = "") -> List[Dict[str, Any]]:
+    """List files/directories in a relative path next to the IDB.
+
+    Returns a list of dicts, each with 'name', 'path' (relative), and 'is_dir'.
+    """
+    # Use IDB directory as the base
+    base_dir = os.path.dirname(idc.get_idb_path())
+    if not base_dir:
+        raise IDAError("Could not determine the IDB directory.")
+
+    target_dir_abs = os.path.abspath(base_dir)
+    if relative_path:
+        try:
+            target_dir_abs = _validate_relative_path(base_dir, relative_path)
+            if not os.path.isdir(target_dir_abs):
+                 raise IDAError(f"Relative path '{relative_path}' is not a valid directory.")
+        except IDAError as e:
+             raise e
+        except Exception as e:
+             raise IDAError(f"Error resolving relative path '{relative_path}': {str(e)}")
+
+    results = []
+    try:
+        for item_name in os.listdir(target_dir_abs):
+            item_abs_path = os.path.join(target_dir_abs, item_name)
+            item_rel_path = os.path.join(relative_path, item_name) # Keep path relative for output
+            is_dir = os.path.isdir(item_abs_path)
+            results.append({
+                "name": item_name,
+                "path": item_rel_path.replace('\\', '/'), # Normalize path separators
+                "is_dir": is_dir
+            })
+        return results
+    except FileNotFoundError:
+        raise IDAError(f"Directory not found for relative path: '{relative_path}'")
+    except PermissionError:
+        raise IDAError(f"Permission denied accessing directory for relative path: '{relative_path}'")
+    except Exception as e:
+        raise IDAError(f"Error listing directory for relative path '{relative_path}': {str(e)}")
+
+
+@jsonrpc
+@idaread
+def read_file(relative_path: str) -> str:
+    """Read the content of a text file relative to the IDB."""
+    base_dir = os.path.dirname(idc.get_idb_path())
+    if not base_dir:
+        raise IDAError("Could not determine the IDB directory.")
+
+    try:
+        full_path = _validate_relative_path(base_dir, relative_path)
+        if not os.path.isfile(full_path):
+            raise IDAError(f"File not found or is not a regular file: {relative_path}")
+
+        with open(full_path, "r", encoding='utf-8', errors='replace') as f:
+            return f.read()
+    except IDAError as e:
+        raise e
+    except FileNotFoundError:
+        raise IDAError(f"File not found: {relative_path}")
+    except PermissionError:
+        raise IDAError(f"Permission denied reading file: {relative_path}")
+    except Exception as e:
+        raise IDAError(f"Error reading file '{relative_path}': {str(e)}")
+
+
+@jsonrpc
+@idawrite # Marked as write as it modifies the filesystem
+def write_file(relative_path: str, content: str) -> str:
+    """Write content to a text file relative to the IDB."""
+    base_dir = os.path.dirname(idc.get_idb_path())
+    if not base_dir:
+        raise IDAError("Could not determine the IDB directory.")
+
+    try:
+        full_path = _validate_relative_path(base_dir, relative_path)
+        # Ensure parent directory exists
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+
+        with open(full_path, "w", encoding='utf-8') as f:
+            f.write(content)
+        return f"Successfully wrote to {relative_path}"
+    except IDAError as e:
+        raise e
+    except PermissionError:
+        raise IDAError(f"Permission denied writing file: {relative_path}")
+    except Exception as e:
+        raise IDAError(f"Error writing file '{relative_path}': {str(e)}")
+
+
+@jsonrpc
+@idaread
+def read_binary(relative_path: str) -> str:
+    """Read the content of a binary file relative to the IDB as hex."""
+    base_dir = os.path.dirname(idc.get_idb_path())
+    if not base_dir:
+        raise IDAError("Could not determine the IDB directory.")
+
+    try:
+        full_path = _validate_relative_path(base_dir, relative_path)
+        if not os.path.isfile(full_path):
+            raise IDAError(f"File not found or is not a regular file: {relative_path}")
+
+        with open(full_path, "rb") as f:
+            binary_content = f.read()
+        # Return as hex string for JSON compatibility
+        return binary_content.hex()
+    except IDAError as e:
+        raise e
+    except FileNotFoundError:
+        raise IDAError(f"File not found: {relative_path}")
+    except PermissionError:
+        raise IDAError(f"Permission denied reading file: {relative_path}")
+    except Exception as e:
+        raise IDAError(f"Error reading binary file '{relative_path}': {str(e)}")
+
+
+@jsonrpc
+@idawrite # Marked as write as it modifies the filesystem
+def write_binary(relative_path: str , content_hex: str) -> str:
+    """Write hex-encoded content to a binary file relative to the IDB."""
+    base_dir = os.path.dirname(idc.get_idb_path())
+    if not base_dir:
+        raise IDAError("Could not determine the IDB directory.")
+
+    try:
+        # Decode hex content back to bytes
+        binary_content = bytes.fromhex(content_hex)
+    except ValueError:
+        raise IDAError("Invalid hex content provided.")
+
+    try:
+        full_path = _validate_relative_path(base_dir, relative_path)
+        # Ensure parent directory exists
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+
+        with open(full_path, "wb") as f:
+            f.write(binary_content)
+        return f"Successfully wrote binary content to {relative_path}"
+    except IDAError as e:
+        raise e
+    except PermissionError:
+        raise IDAError(f"Permission denied writing file: {relative_path}")
+    except Exception as e:
+        raise IDAError(f"Error writing binary file '{relative_path}': {str(e)}")
+
+
+@jsonrpc
+@idawrite # Marked as write as it can execute arbitrary code
+def eval_python(script: str) -> Any:
+    """Evaluate a Python script string within IDA's context. Use with extreme caution."""
+    # WARNING: This is potentially dangerous. Only run trusted scripts.
+    # Consider adding more safety checks if needed.
+    try:
+        # Using exec to allow statements, not just expressions
+        # Provide globals/locals for context, potentially restricted
+        ida_globals = {
+            "idaapi": idaapi,
+            "idc": idc,
+            "idautils": idautils,
+            "ida_bytes": ida_bytes,
+            "ida_funcs": ida_funcs,
+            "ida_kernwin": ida_kernwin,
+            "ida_nalt": ida_nalt,
+            "ida_hexrays": ida_hexrays,
+            # Add other modules as needed
+        }
+        local_vars = {}
+        exec(script, ida_globals, local_vars)
+        # Attempt to return a result if the script assigns to a 'result' variable
+        return local_vars.get('result', "Script executed successfully.")
+    except Exception as e:
+        # Capture and return the exception message for debugging
+        raise IDAError(f"Error executing Python script: {str(e)}\n{traceback.format_exc()}")
+
+
+@jsonrpc
+@idaread
+def get_instruction_length(address_str: str) -> int:
+    """
+    Retrieves the length (in bytes) of the instruction at the specified address. Returns 0 if invalid/undecodable.
+    Args:
+        address_str: The address string of the instruction.
+
+    Returns:
+        The length (in bytes) of the instruction. Returns 0 if the instruction cannot be decoded or address is invalid.
+    """
+    try:
+        address = parse_address(address_str)
+        if not ida_bytes.is_loaded(address):
+             print(f"[MCP] Address {hex(address)} not loaded for get_instruction_length.")
+             return 0
+
+        insn = ida_ua.insn_t()
+        length = ida_ua.decode_insn(insn, address)
+        # decode_insn returns 0 if it fails or if it's not the start of an instruction
+        if length == 0:
+            # Check if it's actually code before printing error
+            flags = ida_bytes.get_flags(address)
+            if ida_bytes.is_code(flags):
+                 print(f"[MCP] Failed to decode instruction at address {hex(address)}")
+            # else: it might be data or undefined, returning 0 is correct.
+            return 0
+        return length
+    except IDAError as e: # Catch parse_address errors
+         print(f"[MCP] Error parsing address for get_instruction_length: {str(e)}")
+         return 0
+    except Exception as e:
+        print(f"[MCP] Unexpected error in get_instruction_length at {address_str}: {str(e)}")
+        return 0
+
+# --- Added Tools End ---
+
+
 
 class MCP(idaapi.plugin_t):
     flags = idaapi.PLUGIN_KEEP

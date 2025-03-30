@@ -142,6 +142,106 @@ class MCPVisitor(ast.NodeVisitor):
                     self.types[node.name] = node
 
 
+# --- Added Prompt Start ---
+
+@mcp.prompt()
+def binary_analysis_strategy() -> str:
+    """
+    Guide for analyzing the binary using the available IDA Pro MCP tools.
+    """
+    # Fetching the list of tools dynamically might be better in the future,
+    # but for now, we'll use the list provided in the request.
+    # Note: This list needs to be manually updated if tools change.
+    return (
+        "IDA Pro MCP Server Tools and Best Practices:\n\n"
+        "Tools Available:\n"
+        "- check_connection: Check connectivity with the IDA plugin.\n"
+        "- get_metadata: Get metadata about the current IDB (path, base, size, hashes).\n"
+        "- get_function_by_name: Get function details (address, name, size) by name.\n"
+        "- get_function_by_address: Get function details by address.\n"
+        "- get_current_address: Get the address currently selected in IDA.\n"
+        "- get_current_function: Get the function currently selected in IDA.\n"
+        "- convert_number: Convert a number between decimal, hex, bytes, ASCII, binary.\n"
+        "- list_functions: List all functions in the database (paginated).\n"
+        "- decompile_function: Decompile a function and get pseudocode.\n"
+        "- disassemble_function: Get assembly listing for a function.\n"
+        "- get_xrefs_to: Get all cross-references to a given address.\n"
+        "- get_entry_points: Get all defined entry points in the database.\n"
+        "- set_comment: Set a comment in disassembly and pseudocode.\n"
+        "- rename_local_variable: Rename a local variable within a function.\n"
+        "- rename_function: Rename a function.\n"
+        "- set_function_prototype: Set a function's prototype string.\n"
+        "- set_local_variable_type: Set the type of a local variable.\n"
+        # --- Newly Added Tools (from user request) ---
+        "- get_exports: Get all exports (index, ordinal, ea, name).\n"
+        "- get_entry_point: Get the main entry point address.\n"
+        "- make_function: Create a function at a specified address.\n"
+        "- undefine_function: Undefine a function at a specified address.\n"
+        "- get_dword_at: Get the 4-byte value at an address.\n"
+        "- get_word_at: Get the 2-byte value at an address.\n"
+        "- get_byte_at: Get the 1-byte value at an address.\n"
+        "- get_qword_at: Get the 8-byte value at an address.\n"
+        "- get_float_at: Get the float value at an address.\n"
+        "- get_double_at: Get the double value at an address.\n"
+        "- get_string_at: Get the string starting at an address.\n"
+        "- get_strings: Get all strings in the binary (with addresses).\n"
+        "- get_current_file_path: Get the full path of the loaded IDB/binary.\n"
+        "- list_files_with_relative_path: List files/dirs relative to the IDB location.\n"
+        "- read_file: Read content of a text file relative to the IDB.\n"
+        "- write_file: Write content to a text file relative to the IDB.\n"
+        "- read_binary: Read content of a binary file relative to the IDB (returns hex).\n"
+        "- write_binary: Write hex content to a binary file relative to the IDB.\n"
+        "- eval_python: Evaluate a Python script string in IDA (Use with caution!).\n"
+        "- get_instruction_length: Get the length (bytes) of the instruction at an address.\n"
+        # --- Tools Still Missing Implementation ---
+        # "- get_bytes: Get raw bytes at a specified address."
+        # "- get_disasm: Get single line disassembly at an address."
+        # "- get_decompiled_func: Get pseudocode of the function containing an address." (Similar to decompile_function?)
+        # "- get_function_name: Get function name at an address." (Similar to get_function_by_address?)
+        # "- get_segments: Get all segment information."
+        # "- get_functions: Get all functions." (Similar to list_functions?)
+        # "- get_imports: Get all imported functions."
+        "\nBest Practices for Binary Analysis:\n"
+        "1. Initial Reconnaissance:\n"
+        "   - `get_metadata()`: Understand basic file info (hashes, size).\n"
+        "   - `get_entry_point()` / `get_entry_points()`: Find where execution starts.\n"
+        "   - `get_imports()`: Check imported libraries/functions for capabilities (networking, file I/O, crypto).\n"
+        "   - `get_exports()`: See what functionality the binary exposes.\n"
+        "   - `get_strings()`: Look for interesting text (IPs, URLs, paths, commands, keys).\n"
+        "   - `get_segments()`: Understand memory layout (code, data, resources).\n"
+        "2. Code Exploration:\n"
+        "   - Start at entry points or interesting functions found via strings/imports.\n"
+        "   - `disassemble_function()` / `get_disasm()`: Examine assembly code.\n"
+        "   - `decompile_function()` / `get_decompiled_func()`: Understand logic via pseudocode (if available).\n"
+        "   - `get_function_name()` / `get_function_by_address()`: Identify functions.\n"
+        "   - `get_xrefs_to()`: Follow code/data flow. Find where functions/data are used.\n"
+        "3. Data Analysis:\n"
+        "   - `get_bytes()`: Read raw byte sequences.\n"
+        "   - `get_byte_at()`, `get_word_at()`, `get_dword_at()`, `get_qword_at()`: Read specific data sizes.\n"
+        "   - `get_float_at()`, `get_double_at()`: Read floating-point values.\n"
+        "   - `get_string_at()`: Read specific strings if `get_strings()` missed them.\n"
+        "   - `convert_number()`: Interpret numerical values.\n"
+        "4. Interaction & Modification (Use with care):\n"
+        "   - `set_comment()`: Add notes to disassembly/pseudocode.\n"
+        "   - `rename_function()`, `rename_local_variable()`: Improve readability.\n"
+        "   - `set_function_prototype()`, `set_local_variable_type()`: Define data structures and function signatures.\n"
+        "   - `make_function()`, `undefine_function()`: Correct IDA's analysis if needed.\n"
+        "   - `eval_python()`: Run custom scripts for complex tasks (DANGEROUS - verify script logic).\n"
+        "5. Filesystem Interaction (Use with care):\n"
+        "   - `get_current_file_path()`: Know the base directory.\n"
+        "   - `list_files_with_relative_path()`: Explore nearby files.\n"
+        "   - `read_file()`, `read_binary()`: Load external data/scripts.\n"
+        "   - `write_file()`, `write_binary()`: Save analysis results or extracted data.\n"
+        "General Tips:\n"
+        "- Combine tools: Use `get_strings()` then `get_xrefs_to()` on interesting string addresses.\n"
+        "- Use `get_current_address()` / `get_current_function()` to quickly analyze the area you're looking at in the IDA GUI.\n"
+        "- Paginate large results (`list_functions`).\n"
+        "- Be mindful of addresses (hex vs dec) and use `parse_address` internally or `convert_number` externally.\n"
+    )
+
+# --- Added Prompt End ---
+
+
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 IDA_PLUGIN_PY = os.path.join(SCRIPT_DIR, "mcp-plugin.py")
 GENERATED_PY = os.path.join(SCRIPT_DIR, "server_generated.py")
